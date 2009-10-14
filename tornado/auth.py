@@ -809,6 +809,7 @@ class FacebookMixin(object):
             "last_name": users[0]["last_name"],
             "uid": users[0]["uid"],
             "locale": users[0]["locale"],
+            "photo": users[0]['pic_square'],
             "session_key": session["session_key"],
             "session_expires": session["expires"],
         })
