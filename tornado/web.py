@@ -298,6 +298,9 @@ class RequestHandler(object):
 
     def render(self, template_name, **kwargs):
         """Renders the template with the given arguments as the response."""
+        if 'template_globals' in self.settings:
+            kwargs.update(self.settings['template_globals'])
+        kwargs['settings'] = self.settings
         html = self.render_string(template_name, **kwargs)
 
         # Insert the additional JS and CSS added by the modules on the page
@@ -1228,3 +1231,4 @@ class _O(dict):
 
     def __setattr__(self, name, value):
         self[name] = value
+
