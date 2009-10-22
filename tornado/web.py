@@ -394,6 +394,7 @@ class RequestHandler(object):
             _=self.locale.translate,
             static_url=self.static_url,
             xsrf_form_html=self.xsrf_form_html,
+            reverse_url=self.application.reverse_url
         )
         args.update(self.ui)
         args.update(kwargs)
@@ -617,6 +618,9 @@ class RequestHandler(object):
         application (which specifies the root directory of your static
         files).
 
+        This method makes use of the 'static_url_path' setting if it 
+        exists to construct a URL rooted at that path.
+
         We append ?v=<signature> to the returned URL, which makes our
         static file handler set an infinite expiration header on the
         returned content. The signature is based on the content of the
@@ -640,12 +644,23 @@ class RequestHandler(object):
             except:
                 logging.error("Could not open static file %r", path)
                 hashes[path] = None
-        base = self.request.protocol + "://" + self.request.host \
-            if getattr(self, "include_host", False) else ""
+        base = ""
+        if getattr(self, 'include_host', False):
+            host = self.application.settings.get('static_url', 
+                                                 self.request.host)
+            if not host.startswith('http://') or \
+                    not host.startswith('https://'):
+                base = self.request.protocol + '://' + host
+            else:
+                base = host
+        
+        url_path = self.application.settings.get('static_url_path',
+                                                    '/static/')
         if hashes.get(path):
-            return base + "/static/" + path + "?v=" + hashes[path][:5]
+            return base + url_path + path + "?v=" + hashes[path][:5]
         else:
-            return base + "/static/" + path
+            return base + url_path + path
+
 
     def async_callback(self, callback, *args, **kwargs):
         """Wrap callbacks with this if they are used on asynchronous requests.
@@ -861,6 +876,7 @@ class Application(object):
         else:
             self.transforms = transforms
         self.handlers = []
+        self.named_handlers = {}
         self.default_host = default_host
         self.settings = settings
         self.ui_modules = {}
@@ -871,8 +887,17 @@ class Application(object):
         if self.settings.get("static_path"):
             path = self.settings["static_path"]
             handlers = list(handlers or [])
+
+            url_path = self.settings.get('static_url_path', '/static/')
+            if not url_path.startswith('/'):
+                url_path = '/' + url_path
+            if not url_path.endswith('/'):
+                url_path += '/'
+
+            self.settings['static_url_path'] = url_path
+
             handlers.extend([
-                (r"/static/(.*)", StaticFileHandler, dict(path=path)),
+                (r"%s(.*)" % url_path, StaticFileHandler, dict(path=path)),
                 (r"/(favicon\.ico)", StaticFileHandler, dict(path=path)),
                 (r"/(robots\.txt)", StaticFileHandler, dict(path=path)),
             ])
@@ -901,6 +926,9 @@ class Application(object):
             if not pattern.endswith("$"):
                 pattern += "$"
             handlers.append((re.compile(pattern), handler, kwargs))
+
+            if isinstance(handler_tuple, URLSpec):
+                self.named_handlers[handler_tuple.name] = handler_tuple
 
     def add_transform(self, transform_class):
         """Adds the given OutputTransform to our transform list."""
@@ -973,6 +1001,14 @@ class Application(object):
         handler._execute(transforms, *args)
         return handler
 
+    def reverse_url(self, name, *args):
+        """Returns a URL path for handler named `name`
+
+        The handler must be added to the application as a URLSpec
+        """
+        if name in self.named_handlers:
+            return self.named_handlers[name].reverse(*args)
+        raise KeyError("%s not found in named urls" % name)
 
 class HTTPError(Exception):
     """An exception that will turn into an HTTP error response."""
@@ -1201,6 +1237,71 @@ class UIModule(object):
     def render_string(self, path, **kwargs):
         return self.handler.render_string(path, **kwargs)
 
+class URLSpec(object):
+    """A tuple like object for specifying handlers in an application
+
+    Rather than hard code URLs in templates, or redirects, HandlerSpecs allow
+    us to give a handler a name which we can then use to lookup and compute the
+    URL.
+    """
+    __slots__ = ('pattern', 'handler', 'kwargs', 'name',
+                 'path', 'group_count')
+    def __init__(self, pattern, handler, kwargs=None, name=None):
+        if not pattern.endswith('$'):
+            pattern += '$'
+        self.pattern = pattern
+        self.handler = handler
+        self.kwargs = kwargs
+        self.name = name
+        path, gc = self._find_groups(pattern)
+        self.path = path
+        self.group_count = gc
+    
+    def __len__(self):
+        return 3 if self.kwargs else 2
+
+    def __getitem__(self, i):
+        if not isinstance(i, int):
+            raise TypeError('indices must be integegers')
+        length = len(self)
+        attr = self.__slots__[:length][i]
+
+        return getattr(self, attr)
+
+    def _find_groups(self, pattern):
+        """Returns a tuple (reverse string, group count) for a url.
+
+        For example: Given the url pattern /([0-9]{4})/([a-z-]+)/, this method
+        would return ('/%s/%s/', 2).
+        """
+        if pattern.startswith('^'):
+            pattern = pattern[1:]
+        if pattern.endswith('$'):
+            pattern = pattern[:-1]
+
+        _pattern = re.compile(pattern)
+        assert _pattern.groups == pattern.count('('), "Pattern's group count"\
+            " does not match the number of right parenthesis"
+
+        pieces = []
+        for fragment in pattern.split('('):
+            if ')' in fragment:
+                paren_loc = fragment.index(')')
+                if paren_loc >= 0:
+                    pieces.append('%s' + fragment[paren_loc + 1:])
+            else:
+                pieces.append(fragment)
+
+        return (''.join(pieces), _pattern.groups)
+
+    def reverse(self, *args):
+        assert len(args) == self.group_count, "required number of arguments "\
+            "not found"
+        if not len(args):
+            return self.path
+        return self.path % tuple([str(a) for a in args])
+
+url = URLSpec
 
 def _utf8(s):
     if isinstance(s, unicode):
